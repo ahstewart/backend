@@ -1,0 +1,204 @@
+import uuid
+from datetime import datetime, UTC
+from enum import Enum
+from typing import List, Dict, Any, Optional
+
+from pydantic import BaseModel as PydanticBaseModel, AnyHttpUrl
+from sqlmodel import SQLModel, Field, Relationship
+from sqlalchemy import Column, String
+from sqlalchemy.dialects.postgresql import JSONB
+
+# ==========================================
+# 1. ENUMS (Shared Constraints)
+# ==========================================
+
+class ModelCategory(str, Enum):
+    UTILITY = "utility"             # e.g. Watermelon Thumper
+    DIAGNOSTIC = "diagnostic"       # e.g. Engine Sound Analyzer
+    PERFORMANCE = "performance"     # e.g. NPU Benchmarks
+    FUN = "fun"                     # e.g. Dog Breed Identifier
+    OTHER = "other"
+
+class AssetType(str, Enum):
+    TFLITE = "tflite"
+    LABEL_TXT = "label_txt"
+    VOCAB_TXT = "vocab_txt"
+    CONFIG_JSON = "config_json"
+
+class DevicePlatform(str, Enum):
+    ANDROID = "android"
+    IOS = "ios"
+
+class LicenseType(str, Enum):
+    APACHE_2_0 = "Apache 2.0"
+    MIT = "MIT"
+    CC_BY_SA = "CC-BY-SA"
+    UNKNOWN = "Unknown"
+
+# ==========================================
+# 2. JSON COMPONENTS (The "Inner" Data)
+# ==========================================
+# These are pure Pydantic models stored inside the JSONB columns.
+
+class PipelineStep(PydanticBaseModel):
+    step_name: str
+    params: Dict[str, Any] = {}
+
+class PipelineConfig(PydanticBaseModel):
+    input_nodes: List[str]
+    output_nodes: List[str]
+    pre_processing: List[PipelineStep] = []
+    post_processing: List[PipelineStep] = []
+    asset_map: Dict[str, str] = {}
+
+class MLModelAsset(PydanticBaseModel):
+    asset_key: str
+    asset_type: AssetType
+    source_url: str  # External link (HuggingFace, S3, etc.)
+    file_size_bytes: int
+    file_hash: str   # SHA256 Integrity Check
+    is_hosted_by_us: bool = False
+
+# ==========================================
+# 3. USER ENTITY
+# ==========================================
+
+class UserBase(SQLModel):
+    username: str = Field(index=True, unique=True)
+    email: str = Field(index=True, unique=True)
+    is_developer: bool = False
+
+class UserDB(UserBase, table=True):
+    __tablename__ = "users"
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    
+    # Relationships
+    models: List["MLModelDB"] = Relationship(back_populates="author")
+
+class UserRead(UserBase):
+    id: uuid.UUID
+
+# ==========================================
+# 4. ML MODEL ENTITY (The "Product")
+# ==========================================
+
+class MLModelBase(SQLModel):
+    name: str
+    slug: Optional[str] = Field(index=True, unique=True)
+    description: str | None = None
+    category: ModelCategory = Field(default=ModelCategory.UTILITY)
+    license_type: LicenseType = Field(default=LicenseType.UNKNOWN)
+    origin_repo_url: Optional[str] = None
+    
+    # Simple JSON list for tags (sa_column defined in DB model to avoid Pydantic confusion)
+    # or we can define it here if we are careful. simpler to handle in DB class for JSONB.
+
+class MLModelDB(MLModelBase, table=True):
+    __tablename__ = "ml_models"
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    author_id: uuid.UUID = Field(foreign_key="users.id")
+    tags: List[str] = Field(sa_column=Column(JSONB), default=[])
+    
+    # Metrics (Updated by background workers)
+    total_download_count: int = 0  
+    rating_weighted_avg: float = 0.0
+    total_ratings: int = 0
+    created_at: datetime = Field(default_factory=datetime.now(tz=UTC))
+    
+    # Relationships
+    author: UserDB = Relationship(back_populates="models")
+    versions: List["ModelVersionDB"] = Relationship(back_populates="model")
+
+class MLModelCreate(MLModelBase):
+    description: str
+    tags: List[str] = []
+
+class MLModelRead(MLModelBase):
+    id: uuid.UUID
+    author_id: uuid.UUID
+    description: str
+    tags: List[str]
+    total_download_count: int
+    total_ratings: int
+    rating_avg: float
+    created_at: datetime
+
+# ==========================================
+# 5. MODEL VERSION ENTITY (The "Logic")
+# ==========================================
+
+class ModelVersionBase(SQLModel):
+    version_string: str = Field(index=True) # "1.0.0"
+    changelog: Optional[str] = None
+
+class ModelVersionDB(ModelVersionBase, table=True):
+    __tablename__ = "model_versions"
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    model_id: uuid.UUID = Field(foreign_key="ml_models.id")
+    
+    # COMPLEX JSONB COLUMNS
+    pipeline_spec: PipelineConfig = Field(sa_column=Column(JSONB))
+    assets: List[MLModelAsset] = Field(sa_column=Column(JSONB))
+    
+    # Telemetry Aggregates
+    published_at: datetime = Field(default_factory=datetime.now(tz=UTC))
+    download_count: int = 0
+    num_ratings: int = 0
+    rating_avg: float = 0
+        
+    # Relationships
+    model: MLModelDB = Relationship(back_populates="versions")
+    logs: List["InferenceLogDB"] = Relationship(back_populates="version")
+
+class ModelVersionCreate(ModelVersionBase):
+    pipeline_spec: PipelineConfig
+    assets: List[MLModelAsset]
+
+class ModelVersionRead(ModelVersionBase):
+    id: uuid.UUID
+    model_id: uuid.UUID
+    pipeline_spec: PipelineConfig
+    assets: List[MLModelAsset]
+    published_at: datetime
+    download_count: int = 0
+    num_ratings: int = 0
+    rating_avg: float = 0
+
+# ==========================================
+# 6. TELEMETRY (The "Diagnostic Hub")
+# ==========================================
+
+class InferenceLogDB(SQLModel, table=True):
+    __tablename__ = "inference_logs"
+    id: int = Field(default=None, primary_key=True) # BigInt
+    model_version_id: uuid.UUID = Field(foreign_key="model_versions.id")
+    timestamp: datetime = Field(default_factory=datetime.now(tz=UTC), index=True)
+    
+    device_model: str
+    platform: DevicePlatform
+    total_inference_ms: int
+    success: bool
+    
+    version: ModelVersionDB = Relationship(back_populates="logs")
+
+class InferenceLogCreate(SQLModel):
+    # What the App sends us
+    device_model: str
+    platform: DevicePlatform
+    total_inference_ms: int
+    success: bool
+
+# ==========================================
+# 7. SPECIAL API RESPONSES (DTOs)
+# ==========================================
+
+class ModelManifestResponse(PydanticBaseModel):
+    """
+    The specific JSON payload required by the Flutter InferenceService.
+    Combines 'Model' metadata with 'Version' logic.
+    """
+    id: uuid.UUID
+    name: str
+    version: str
+    assets: List[MLModelAsset]
+    pipeline: PipelineConfig
