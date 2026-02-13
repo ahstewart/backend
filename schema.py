@@ -1,12 +1,18 @@
 import uuid
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Dict, Any, Optional
 
-from pydantic import BaseModel as PydanticBaseModel, AnyHttpUrl
+from pydantic import BaseModel as PydanticBaseModel
 from sqlmodel import SQLModel, Field, Relationship
-from sqlalchemy import Column, String
+from sqlalchemy import Column
 from sqlalchemy.dialects.postgresql import JSONB
+
+# ==========================================
+# 0. HELPERS
+# ==========================================
+def utc_now():
+    return datetime.now(timezone.utc)
 
 # ==========================================
 # 1. ENUMS (Shared Constraints)
@@ -38,7 +44,7 @@ class LicenseType(str, Enum):
 # ==========================================
 # 2. JSON COMPONENTS (The "Inner" Data)
 # ==========================================
-# These are pure Pydantic models stored inside the JSONB columns.
+# These are used for Validation in API Requests/Responses
 
 class PipelineStep(PydanticBaseModel):
     step_name: str
@@ -54,9 +60,9 @@ class PipelineConfig(PydanticBaseModel):
 class MLModelAsset(PydanticBaseModel):
     asset_key: str
     asset_type: AssetType
-    source_url: str  # External link (HuggingFace, S3, etc.)
+    source_url: str 
     file_size_bytes: int
-    file_hash: str   # SHA256 Integrity Check
+    file_hash: str 
     is_hosted_by_us: bool = False
 
 # ==========================================
@@ -67,6 +73,8 @@ class UserBase(SQLModel):
     username: str = Field(index=True, unique=True)
     email: str = Field(index=True, unique=True)
     is_developer: bool = False
+    # FIX: Use helper function for time
+    created_at: datetime = Field(default_factory=utc_now)
 
 class UserDB(UserBase, table=True):
     __tablename__ = "users"
@@ -85,25 +93,25 @@ class UserRead(UserBase):
 class MLModelBase(SQLModel):
     name: str
     slug: Optional[str] = Field(index=True, unique=True)
-    description: str | None = None
+    description: Optional[str] = None
     category: ModelCategory = Field(default=ModelCategory.UTILITY)
     license_type: LicenseType = Field(default=LicenseType.UNKNOWN)
     origin_repo_url: Optional[str] = None
-    
-    # Simple JSON list for tags (sa_column defined in DB model to avoid Pydantic confusion)
-    # or we can define it here if we are careful. simpler to handle in DB class for JSONB.
 
 class MLModelDB(MLModelBase, table=True):
     __tablename__ = "ml_models"
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     author_id: uuid.UUID = Field(foreign_key="users.id")
-    tags: List[str] = Field(sa_column=Column(JSONB), default=[])
+    hf_model_id: Optional[str] = Field(default=None, index=True)
     
-    # Metrics (Updated by background workers)
+    # FIX: Use default_factory for mutable list
+    tags: List[str] = Field(sa_column=Column(JSONB), default_factory=list)
+    
+    # Metrics
     total_download_count: int = 0  
     rating_weighted_avg: float = 0.0
     total_ratings: int = 0
-    created_at: datetime = Field(default_factory=datetime.now(tz=UTC))
+    created_at: datetime = Field(default_factory=utc_now)
     
     # Relationships
     author: UserDB = Relationship(back_populates="models")
@@ -111,7 +119,7 @@ class MLModelDB(MLModelBase, table=True):
 
 class MLModelCreate(MLModelBase):
     description: str
-    tags: List[str] = []
+    tags: List[str] = Field(default_factory=list)
 
 class MLModelRead(MLModelBase):
     id: uuid.UUID
@@ -120,7 +128,8 @@ class MLModelRead(MLModelBase):
     tags: List[str]
     total_download_count: int
     total_ratings: int
-    rating_avg: float
+    # FIX: Renamed to match DB column exactly
+    rating_weighted_avg: float 
     created_at: datetime
 
 # ==========================================
@@ -135,13 +144,16 @@ class ModelVersionDB(ModelVersionBase, table=True):
     __tablename__ = "model_versions"
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     model_id: uuid.UUID = Field(foreign_key="ml_models.id")
+    # Stores the specific git commit hash (e.g. "9a3f2b...")
+    # This ensures we know exactly which version of the file we are pointing to
+    hf_commit_sha: Optional[str] = None
     
-    # COMPLEX JSONB COLUMNS
-    pipeline_spec: PipelineConfig = Field(sa_column=Column(JSONB))
-    assets: List[MLModelAsset] = Field(sa_column=Column(JSONB))
+    # Typed as generic Dict/List for SQL storage safety
+    # We trust the 'Create' model to validate the structure before saving
+    pipeline_spec: Dict[str, Any] = Field(sa_column=Column(JSONB))
+    assets: List[Dict[str, Any]] = Field(sa_column=Column(JSONB))
     
-    # Telemetry Aggregates
-    published_at: datetime = Field(default_factory=datetime.now(tz=UTC))
+    published_at: datetime = Field(default_factory=utc_now)
     download_count: int = 0
     num_ratings: int = 0
     rating_avg: float = 0
@@ -151,28 +163,30 @@ class ModelVersionDB(ModelVersionBase, table=True):
     logs: List["InferenceLogDB"] = Relationship(back_populates="version")
 
 class ModelVersionCreate(ModelVersionBase):
+    # Strict validation happens here on input
     pipeline_spec: PipelineConfig
     assets: List[MLModelAsset]
 
 class ModelVersionRead(ModelVersionBase):
     id: uuid.UUID
     model_id: uuid.UUID
+    # Strict validation happens here on output
     pipeline_spec: PipelineConfig
     assets: List[MLModelAsset]
     published_at: datetime
-    download_count: int = 0
-    num_ratings: int = 0
-    rating_avg: float = 0
+    download_count: int
+    num_ratings: int
+    rating_avg: float
 
 # ==========================================
-# 6. TELEMETRY (The "Diagnostic Hub")
+# 6. TELEMETRY
 # ==========================================
 
 class InferenceLogDB(SQLModel, table=True):
     __tablename__ = "inference_logs"
-    id: int = Field(default=None, primary_key=True) # BigInt
+    id: Optional[int] = Field(default=None, primary_key=True) # BigInt auto-increment
     model_version_id: uuid.UUID = Field(foreign_key="model_versions.id")
-    timestamp: datetime = Field(default_factory=datetime.now(tz=UTC), index=True)
+    timestamp: datetime = Field(default_factory=utc_now, index=True)
     
     device_model: str
     platform: DevicePlatform
@@ -182,21 +196,16 @@ class InferenceLogDB(SQLModel, table=True):
     version: ModelVersionDB = Relationship(back_populates="logs")
 
 class InferenceLogCreate(SQLModel):
-    # What the App sends us
     device_model: str
     platform: DevicePlatform
     total_inference_ms: int
     success: bool
 
 # ==========================================
-# 7. SPECIAL API RESPONSES (DTOs)
+# 7. SPECIAL API RESPONSES
 # ==========================================
 
 class ModelManifestResponse(PydanticBaseModel):
-    """
-    The specific JSON payload required by the Flutter InferenceService.
-    Combines 'Model' metadata with 'Version' logic.
-    """
     id: uuid.UUID
     name: str
     version: str
