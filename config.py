@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     ENVIRONMENT: str = "production"
 
+    # Hugging Face
+    HF_SYNC_FETCH_LIMIT: int
+    HF_APPLICABLE_LIBRARIES: list[str]
+
+
 
 # Use lru_cache so we only read the file once per startup
 @lru_cache

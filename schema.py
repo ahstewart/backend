@@ -36,10 +36,55 @@ class DevicePlatform(str, Enum):
     IOS = "ios"
 
 class LicenseType(str, Enum):
-    APACHE_2_0 = "Apache 2.0"
-    MIT = "MIT"
-    CC_BY_SA = "CC-BY-SA"
-    UNKNOWN = "Unknown"
+    # --- The "Green Light" (Safe for Commercial) ---
+    APACHE_2_0 = "apache-2.0"
+    MIT = "mit"
+    BSD = "bsd"             # Generic BSD family
+    BSD_3_CLAUSE = "bsd-3-clause"
+    BSD_3_CLAUSE_CLEAR = "bsd-3-clause-clear"
+    CC0_1_0 = "cc0-1.0"     # Public Domain
+    AFL_3_0 = "afl-3.0"     # Academic Free License
+
+    # --- The "Yellow Light" (Attribution / Restrictions) ---
+    CC_BY_4_0 = "cc-by-4.0"
+    CC_BY_SA_3_0 = "cc-by-sa-3.0"
+    CC_BY_SA_4_0 = "cc-by-sa-4.0"
+    OPENRAIL = "openrail"
+    OPENRAIL_M = "openrail++" # Often used for Stable Diffusion variants
+    
+    # --- The "Red Light" (Non-Commercial / Copyleft) ---
+    CC_BY_NC_4_0 = "cc-by-nc-4.0"
+    CC_BY_NC_SA_4_0 = "cc-by-nc-sa-4.0"
+    CC_BY_NC_ND_4_0 = "cc-by-nc-nd-4.0"
+    GPL_3_0 = "gpl-3.0"
+    AGPL_3_0 = "agpl-3.0"
+    LLAMA_2 = "llama2"      # Meta's custom license
+    LLAMA_3 = "llama3"      # Meta's custom license
+    
+    # --- Fallback ---
+    OTHER = "other"
+    UNKNOWN = "unknown"
+
+    @property
+    def is_commercial_allowed(self) -> bool:
+        """
+        Helper to determine if this license generally allows commercial use.
+        NOTE: This is a heuristic, not legal advice.
+        """
+        SAFE_LICENSES = {
+            LicenseType.APACHE_2_0, 
+            LicenseType.MIT, 
+            LicenseType.BSD,
+            LicenseType.BSD_3_CLAUSE,
+            LicenseType.BSD_3_CLAUSE_CLEAR,
+            LicenseType.CC0_1_0,
+            LicenseType.AFL_3_0,
+            LicenseType.CC_BY_4_0, # Allowed, but requires attribution
+            LicenseType.OPENRAIL, # Usually allowed with restrictions
+            LicenseType.OPENRAIL_M,
+        }
+        return self in SAFE_LICENSES
+    
 
 # ==========================================
 # 2. JSON COMPONENTS (The "Inner" Data)
@@ -75,6 +120,9 @@ class UserBase(SQLModel):
     is_developer: bool = False
     # FIX: Use helper function for time
     created_at: datetime = Field(default_factory=utc_now)
+    hf_username: Optional[str] = Field(default=None, index=True)
+    hf_verification_token: Optional[str] = Field(default=None)
+    hf_access_token: Optional[str] = Field(default=None)
 
 class UserDB(UserBase, table=True):
     __tablename__ = "users"
@@ -95,7 +143,7 @@ class MLModelBase(SQLModel):
     slug: Optional[str] = Field(index=True, unique=True)
     description: Optional[str] = None
     category: ModelCategory = Field(default=ModelCategory.UTILITY)
-    license_type: LicenseType = Field(default=LicenseType.UNKNOWN)
+    license_type: str = Field(nullable=False, default=LicenseType.UNKNOWN) # Default to UNKNOWN for safety
     origin_repo_url: Optional[str] = None
 
 class MLModelDB(MLModelBase, table=True):
@@ -103,9 +151,13 @@ class MLModelDB(MLModelBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     author_id: uuid.UUID = Field(foreign_key="users.id")
     hf_model_id: Optional[str] = Field(default=None, index=True)
+    is_verified_official: bool = False
     
     # FIX: Use default_factory for mutable list
     tags: List[str] = Field(sa_column=Column(JSONB), default_factory=list)
+    # Stores "image-classification", "text-generation", etc.
+    # We use a string so we don't crash if HF introduces a new task.
+    task: Optional[str] = Field(default=None, index=True)
     
     # Metrics
     total_download_count: int = 0  
