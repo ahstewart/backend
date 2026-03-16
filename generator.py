@@ -244,6 +244,50 @@ def generate_pipeline_config(
                    "params": {{"blank_id": 0, "word_delimiter": "|"}}}}]}}]
     }}
 
+    IMAGE-TO-TEXT RULES (model_task = "image_to_text"):
+    These are VisionEncoderDecoder models (e.g., TrOCR, manga-ocr, BLIP) that take an image and output a text string.
+
+    CRITICAL — check the TFLite input tensor shape from the metadata:
+    - If input shape is 4D (e.g. [1, 3, 224, 224] NCHW or [1, 224, 224, 3] NHWC) with float32 dtype:
+        The full encoder+decoder is fused into the TFLite graph. Use expects_type "image" with
+        resize_image → normalize (ImageNet: mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]) → format steps.
+        For ViT-based models exported from PyTorch, use data_layout "NCHW". For TFLite-native models, use "NHWC".
+        Postprocessing: "decode_tokens" step, interpretation "image_to_text".
+    - If input shape is 2D (e.g. [1, 300] or [1, 128]) with int32/float32 dtype:
+        The TFLite file contains only the text decoder — the image encoder is missing.
+        Set is_supported: false. Reason: "TFLite export is decoder-only; image encoder required."
+        Do NOT label a 2D input as pixel_values or expects_type "image".
+
+    EXAMPLE — full encoder-decoder (ViT-based, NCHW):
+    {{
+      "metadata": [{{"schema_version": "1.0.0", "model_name": "TrOCR", "model_version": "1.0",
+        "model_task": "image_to_text", "framework": "tflite"}}],
+      "inputs": [{{"name": "pixel_values", "shape": [1, 3, 224, 224], "dtype": "float32"}}],
+      "outputs": [{{"name": "output_ids", "shape": [1, 128, 30522], "dtype": "float32"}}],
+      "preprocessing": [{{
+        "input_name": "pixel_values", "expects_type": "image",
+        "steps": [
+          {{"step": "resize_image", "params": {{"height": 224, "width": 224, "method": "bilinear"}}}},
+          {{"step": "normalize", "params": {{"method": "mean_stddev", "mean": [0.485, 0.456, 0.406], "stddev": [0.229, 0.224, 0.225]}}}},
+          {{"step": "format", "params": {{"target_dtype": "float32", "color_space": "RGB", "data_layout": "NCHW"}}}}
+        ]
+      }}],
+      "postprocessing": [{{
+        "output_name": "generated_text", "interpretation": "image_to_text",
+        "source_tensors": ["output_ids"],
+        "steps": [{{"step": "decode_tokens", "params": {{"skip_special_tokens": true}}}}]
+      }}]
+    }}
+
+    TEXT-TO-IMAGE RULES (model_task = "text_to_image"):
+    These models take a text prompt and output a pixel tensor (e.g., diffusion models, GAN decoders).
+    TFLite text-to-image models are rare; most require custom ops or multi-step pipelines.
+    - If the model has a single TFLite graph with int32 text input and a 4D float32 image output, it is supported.
+    - Preprocessing: "tokenize" step (expects_type "text").
+    - Postprocessing: "decode_image" step with channel_format ("HWC" or "CHW") and value_range ("0_1", "neg1_1", "0_255").
+      Use interpretation "generated_image".
+    - If the model requires a multi-step diffusion loop (UNet + scheduler), set is_supported: false.
+
     RULE: Do NOT set is_supported to false for models whose asset file is .litertlm or .task.
     These models MUST use framework "mediapipe_litert" and the "mediapipe_generate" postprocessing step.
 
@@ -560,6 +604,8 @@ SUPPORTED_TASKS = {
     "semantic-segmentation", "semantic_segmentation", "segmentation",
     "text-generation", "text_generation",
     "automatic-speech-recognition", "automatic_speech_recognition",
+    "image-to-text", "image_to_text",
+    "text-to-image", "text_to_image",
 }
 
 _SEGMENTATION_TASKS = SUPPORTED_TASKS & {

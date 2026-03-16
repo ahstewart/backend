@@ -70,6 +70,10 @@ class DecodeSegmentationMaskParams(BaseModel):
     argmax_axis: int = -1          # axis that holds per-class scores (usually last)
     color_map: Optional[str] = None  # "pascal_voc" | "cityscapes" | "ade20k" | None (auto)
 
+class DecodeImageParams(BaseModel):
+    channel_format: Literal["HWC", "CHW"] = Field(default="HWC", description="Channel layout of the output tensor (after stripping batch dim).")
+    value_range: Literal["0_1", "neg1_1", "0_255"] = Field(default="0_1", description="Pixel value range output by the model.")
+
 # ==========================================
 # ASR PARAMS
 # ==========================================
@@ -126,8 +130,8 @@ class PreprocessStep(BaseModel):
     params: Union[ResizeImageParams, NormalizeParams, FormatParams, TokenizeParams, ResampleAudioParams]
 
 class PostprocessStep(BaseModel):
-    step: Literal["apply_activation", "map_labels", "filter_by_score", "decode_boxes", "apply_nms", "generate", "decode_tokens", "mediapipe_generate", "decode_segmentation_mask", "ctc_decode"]
-    params: Union[ApplyActivationParams, MapLabelsParams, FilterByScoreParams, DecodeBoxesParams, ApplyNMSParams, GenerateParams, DecodeTokensParams, MediaPipeGenerateParams, DecodeSegmentationMaskParams, CtcDecodeParams]
+    step: Literal["apply_activation", "map_labels", "filter_by_score", "decode_boxes", "apply_nms", "generate", "decode_tokens", "mediapipe_generate", "decode_segmentation_mask", "ctc_decode", "decode_image"]
+    params: Union[ApplyActivationParams, MapLabelsParams, FilterByScoreParams, DecodeBoxesParams, ApplyNMSParams, GenerateParams, DecodeTokensParams, MediaPipeGenerateParams, DecodeSegmentationMaskParams, CtcDecodeParams, DecodeImageParams]
 
 # ==========================================
 # 5. THE MASTER CONFIGURATION BLOCKS
