@@ -379,10 +379,17 @@ input dtype (float32 vs uint8), output shape, and preprocessing steps.
         return None
     
 
-def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session: Session) -> bool:
+def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session: Session) -> str:
     """
     Executes the pipeline generation for a single version and commits to DB.
-    Returns True if generation was successfully processed (even if unsupported), False if it failed.
+
+    Returns one of:
+      "too_large"         — skipped; file exceeds MAX_PIPELINE_MODEL_SIZE_MB
+      "supported_clean"   — validated and supported on the first attempt
+      "supported_retried" — validated and supported after at least one LLM retry
+      "pending"           — pipeline stored but could not be fully validated
+      "unsupported"       — LLM rejected the model or structural validation failed
+      "failed"            — LLM returned no result / unexpected error
     """
     label = f"{model.name} / {version.version_name}"
 
@@ -393,7 +400,7 @@ def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session
             "[%s] Skipping — file size %.1f MB exceeds MAX_PIPELINE_MODEL_SIZE_MB (%d MB)",
             label, version.file_size_bytes / 1024 / 1024, settings.MAX_PIPELINE_MODEL_SIZE_MB,
         )
-        return False
+        return "too_large"
 
     logger.info("[%s] ── Starting pipeline generation (task=%s) ──", label, model.task)
 
@@ -423,6 +430,7 @@ def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session
 
             # Validate and auto-correct the pipeline via actual TFLite inference
             validation_mode = settings.PIPELINE_VALIDATION_MODE
+            validation_retried = False
             if validation_mode == "none" or not tflite_url:
                 if validation_mode == "none":
                     logger.info("[%s] Validation mode=none — skipping", label)
@@ -454,6 +462,7 @@ def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session
                         break
                     if attempt < settings.MAX_VALIDATION_RETRIES - 1:
                         logger.info("[%s] Re-asking LLM with validation error context...", label)
+                        validation_retried = True
                         retry_result = generate_pipeline_config(
                             model.task, readme_text, metadata_text, model_card_text,
                             validation_error=error,
@@ -485,14 +494,22 @@ def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session
             logger.info("[%s] LLM rejected model — reason: %s", label, result.reasoning)
             version.status = "unsupported"
             version.unsupported_reason = result.reasoning
+            validation_retried = False
 
         session.add(version)
         session.commit()
+
+        # Determine fine-grained outcome for caller statistics
+        if version.status == "supported":
+            outcome = "supported_retried" if validation_retried else "supported_clean"
+        else:
+            outcome = version.status  # "pending" or "unsupported"
+
         logger.info("[%s] ── Done (status=%s) ──", label, version.status)
-        return True
+        return outcome
     else:
         logger.error("[%s] LLM returned no result — leaving as unsupported", label)
-        return False
+        return "failed"
 
 
 
@@ -520,18 +537,19 @@ def run_generator_for_huggingface_model(repo_id: str, commit_sha: str):
         run_generator_for_version(version, model, session)
 
 
-def _process_version_isolated(version_id: int, model_id: int) -> bool:
+def _process_version_isolated(version_id: int, model_id: int) -> str:
     """
     Worker function safe to call from a thread pool.
     Opens its own DB session so threads don't share state.
+    Returns the outcome string from run_generator_for_version.
     """
     with Session(engine) as session:
         version = session.get(ModelVersionDB, version_id)
         model = session.get(MLModelDB, model_id)
         if not version or not model:
-            print(f"  -> Could not load version {version_id} or model {model_id} from DB.")
-            return False
-        print(f"\nProcessing: {model.name} (Version: {version.version_name})")
+            logger.error("Could not load version %d or model %d from DB.", version_id, model_id)
+            return "failed"
+        logger.info("Processing: %s (Version: %s)", model.name, version.version_name)
         return run_generator_for_version(version, model, session)
 
 
@@ -550,6 +568,38 @@ _SEGMENTATION_TASKS = SUPPORTED_TASKS & {
 }
 
 
+def _log_run_summary(label: str, total: int, outcomes: list[str]) -> None:
+    """Logs a structured summary table for a generator run."""
+    too_large       = outcomes.count("too_large")
+    supported_clean = outcomes.count("supported_clean")
+    supported_retry = outcomes.count("supported_retried")
+    pending         = outcomes.count("pending")
+    unsupported     = outcomes.count("unsupported")
+    failed          = outcomes.count("failed")
+
+    logger.info(
+        "\n"
+        "══════════════════════════════════════════\n"
+        "  %s — Run Summary\n"
+        "══════════════════════════════════════════\n"
+        "  Versions considered      : %d\n"
+        "  Skipped (too large)      : %d\n"
+        "  Supported (clean)        : %d\n"
+        "  Supported (after retry)  : %d\n"
+        "  Pending                  : %d\n"
+        "  Unsupported              : %d\n"
+        "  Failed (LLM/DB error)    : %d\n"
+        "══════════════════════════════════════════",
+        label, total,
+        too_large,
+        supported_clean,
+        supported_retry,
+        pending,
+        unsupported,
+        failed,
+    )
+
+
 def process_all_unconfigured():
     """
     The main job loop. Finds all model versions that:
@@ -557,31 +607,36 @@ def process_all_unconfigured():
       - are not yet in "supported" status (i.e. still need generation or a retry)
     Then gathers context, asks the LLM for a config, and saves it if successful.
     """
-    print("Starting LLM Pipeline Generator...")
+    logger.info("Starting LLM Pipeline Generator...")
 
     with Session(engine) as session:
         statement = (
             select(ModelVersionDB, MLModelDB)
             .join(MLModelDB)
-            .where(ModelVersionDB.status != "supported")
+            .where((ModelVersionDB.status != "supported") & (ModelVersionDB.status != "pending"))
             .where(MLModelDB.task.in_(list(SUPPORTED_TASKS)))
         )
         results = session.exec(statement).all()
         pairs = [(v.id, m.id) for v, m in results]
 
     if not pairs:
-        print("No pending models found.")
+        logger.info("No unconfigured model versions found — nothing to do.")
         return
 
-    print(f"Processing {len(pairs)} model(s) with up to {settings.MAX_GENERATOR_WORKERS} parallel workers...")
+    logger.info("Processing %d version(s) with up to %d parallel worker(s)...",
+                len(pairs), settings.MAX_GENERATOR_WORKERS)
+    outcomes: list[str] = []
     with ThreadPoolExecutor(max_workers=settings.MAX_GENERATOR_WORKERS) as executor:
         futures = {executor.submit(_process_version_isolated, vid, mid): (vid, mid) for vid, mid in pairs}
         for future in as_completed(futures):
             vid, mid = futures[future]
             try:
-                future.result()
+                outcomes.append(future.result())
             except Exception as e:
-                print(f"  -> Unhandled error for version {vid}: {e}")
+                logger.error("Unhandled error for version %d: %s", vid, e, exc_info=True)
+                outcomes.append("failed")
+
+    _log_run_summary("process_all_unconfigured", len(pairs), outcomes)
 
 
 def retry_unsupported_segmentation():
@@ -590,7 +645,7 @@ def retry_unsupported_segmentation():
     segmentation-task model, then re-runs pipeline generation for each one.
     Call this after updating the generator rules to allow segmentation.
     """
-    print("Retrying previously-rejected segmentation models...")
+    logger.info("Retrying previously-rejected segmentation models...")
 
     with Session(engine) as session:
         statement = (
@@ -600,22 +655,26 @@ def retry_unsupported_segmentation():
             .where(MLModelDB.task.in_(list(_SEGMENTATION_TASKS)))
         )
         results = session.exec(statement).all()
-
         pairs = [(v.id, m.id) for v, m in results]
 
     if not pairs:
-        print("No unsupported segmentation models found.")
+        logger.info("No unsupported segmentation models found — nothing to do.")
         return
 
-    print(f"Retrying {len(pairs)} segmentation model(s) with up to {settings.MAX_GENERATOR_WORKERS} parallel workers...")
+    logger.info("Retrying %d segmentation version(s) with up to %d parallel worker(s)...",
+                len(pairs), settings.MAX_GENERATOR_WORKERS)
+    outcomes: list[str] = []
     with ThreadPoolExecutor(max_workers=settings.MAX_GENERATOR_WORKERS) as executor:
         futures = {executor.submit(_process_version_isolated, vid, mid): (vid, mid) for vid, mid in pairs}
         for future in as_completed(futures):
             vid, mid = futures[future]
             try:
-                future.result()
+                outcomes.append(future.result())
             except Exception as e:
-                print(f"  -> Unhandled error for version {vid}: {e}")
+                logger.error("Unhandled error for version %d: %s", vid, e, exc_info=True)
+                outcomes.append("failed")
+
+    _log_run_summary("retry_unsupported_segmentation", len(pairs), outcomes)
 
 
 if __name__ == "__main__":
