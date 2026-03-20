@@ -1,7 +1,7 @@
 import yaml
 import httpx
 from huggingface_hub import HfApi
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 SAFE_LICENSES = {"apache-2.0", "mit", "bsd", "bsd-3-clause", "cc0"}
 RESTRICTED_LICENSES = {"gpl", "gpl-2.0", "gpl-3.0", "agpl", "cc-by-nc", "cc-by-nc-sa"}
@@ -42,14 +42,38 @@ def scan_hf_repo_for_version_assets(repo_id: str, commit_sha: str, license_type:
 
     base_resolve_url = f"https://huggingface.co/{repo_id}/resolve/{commit_sha}"
 
-    # Apply Heuristics (Pick the best TFLite file, ignore EdgeTPU by default)
-    best_tflite = next((f for f in tflite_files if "edgetpu" not in f.rfilename.lower()), tflite_files[0]) if tflite_files else None
+    # Apply Heuristics (Pick the best TFLite file(s), ignore EdgeTPU by default)
+    non_edgetpu = [f for f in tflite_files if "edgetpu" not in f.rfilename.lower()]
+    all_clean = non_edgetpu if non_edgetpu else tflite_files
     best_litert_lm = litert_lm_files[0] if litert_lm_files else None
+
+    # Multi-file support: if more than one clean TFLite file, build a stem->URL map
+    if len(all_clean) == 1:
+        best_tflite = all_clean[0]
+        tflite_url = f"{base_resolve_url}/{best_tflite.rfilename}"
+        tflite_files_map = None
+    elif len(all_clean) > 1:
+        tflite_map = {}
+        seen: Dict[str, int] = {}
+        for f in all_clean:
+            stem = f.rfilename.split("/")[-1].replace(".tflite", "")
+            count = seen.get(stem, 0)
+            key = stem if count == 0 else f"{stem}_{count}"
+            seen[stem] = count + 1
+            tflite_map[key] = f"{base_resolve_url}/{f.rfilename}"
+        tflite_url = list(tflite_map.values())[0]  # backward compat
+        tflite_files_map = tflite_map
+        best_tflite = all_clean[0]
+    else:
+        best_tflite = None
+        tflite_url = None
+        tflite_files_map = None
 
     # --- THE NEW JSONB ASSET POINTERS MAP ---
     # This matches the schema.py AssetPointers Pydantic model exactly.
     assets = {
-        "tflite": f"{base_resolve_url}/{best_tflite.rfilename}" if best_tflite else None,
+        "tflite": tflite_url,
+        "tflite_files": tflite_files_map,
         "litert_lm": f"{base_resolve_url}/{best_litert_lm.rfilename}" if best_litert_lm else None,
         "labels": None,
         "tokenizer": None,
@@ -102,6 +126,9 @@ def scan_hf_repo_for_version_assets(repo_id: str, commit_sha: str, license_type:
         "license_type": clean_license,
         "is_commercial_safe": clean_license in SAFE_LICENSES,
         "requires_commercial_warning": clean_license in RESTRICTED_LICENSES,
-        "file_size_bytes": (best_tflite or best_litert_lm).size or 0,
+        "file_size_bytes": (
+            sum(f.size or 0 for f in all_clean) if all_clean
+            else (best_litert_lm.size or 0 if best_litert_lm else 0)
+        ),
         "status": status 
     }

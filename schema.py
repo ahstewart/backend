@@ -42,6 +42,7 @@ class AssetPointers(PydanticBaseModel):
     Adding new asset types here requires ZERO Postgres migrations.
     """
     tflite: Optional[str] = None
+    tflite_files: Optional[Dict[str, str]] = None  # stem -> HF URL (multi-file models)
     litert_lm: Optional[str] = None
     labels: Optional[str] = None
     tokenizer: Optional[str] = None

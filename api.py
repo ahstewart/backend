@@ -410,15 +410,21 @@ def download_model_asset(
 
     # 2. Check if the requested asset exists
     asset_url = version.assets.get(asset_key)
+
+    # Fallback: "tflite_encoder" -> tflite_files["encoder"]
+    if asset_url is None and asset_key.startswith("tflite_") and asset_key != "tflite_files":
+        file_name = asset_key[len("tflite_"):]
+        asset_url = (version.assets.get("tflite_files") or {}).get(file_name)
+
     if not asset_url:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Asset '{asset_key}' not found for this version."
         )
 
-    # 3. Telemetry: Increment download counts 
-    # We only increment if they download the main binary, not just a label file.
-    if asset_key == "tflite":
+    # 3. Telemetry: Increment download counts
+    # We only increment if they download any tflite binary, not just a label file.
+    if asset_key == "tflite" or (asset_key.startswith("tflite_") and asset_key != "tflite_files"):
         version.download_count += 1
         session.add(version)
         

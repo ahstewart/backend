@@ -279,6 +279,22 @@ def generate_pipeline_config(
       }}]
     }}
 
+    ENCODER-DECODER MODELS:
+    When TFLite metadata or the repository contains two TFLite files whose names suggest
+    encoder + decoder roles (e.g., "encoder.tflite" / "decoder.tflite", or "image_encoder" /
+    "text_decoder"):
+      - Set framework to "tflite_encoder_decoder"
+      - Set model_files to {{"encoder": "tflite_<encoder_stem>", "decoder": "tflite_<decoder_stem>"}}
+        where the stem is the filename without extension, lowercased.
+      - inputs: the user-facing inputs (e.g. pixel_values for image)
+      - outputs: the final outputs (e.g. logits from decoder)
+      - preprocessing: image preprocessing block (resize → normalize → format)
+      - postprocessing: one block with steps ["encoder_decoder_generate", "decode_tokens"]
+        and interpretation "image_to_text"
+      - In encoder_decoder_generate params, set encoder_output_name, decoder_input_ids_name,
+        decoder_encoder_states_name from the TFLite tensor names in the metadata.
+      - If only one TFLite file is present, do NOT use this framework — fall back to "tflite".
+
     TEXT-TO-IMAGE RULES (model_task = "text_to_image"):
     These models take a text prompt and output a pixel tensor (e.g., diffusion models, GAN decoders).
     TFLite text-to-image models are rare; most require custom ops or multi-step pipelines.

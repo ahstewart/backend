@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Literal, Union, Optional
+from typing import Dict, List, Literal, Union, Optional
 
 # ==========================================
 # 1. METADATA & TENSOR DEFINITIONS
@@ -9,7 +9,7 @@ class MetadataBlock(BaseModel):
     model_name: str
     model_version: str
     model_task: str
-    framework: Literal["tflite", "pytorch_lite", "onnx", "mediapipe_litert"] = Field(default="tflite")
+    framework: Literal["tflite", "pytorch_lite", "onnx", "mediapipe_litert", "tflite_encoder_decoder"] = Field(default="tflite")
     source_repository: Optional[str] = None
 
 class TensorDefinition(BaseModel):
@@ -111,6 +111,17 @@ class GenerateParams(BaseModel):
 class DecodeTokensParams(BaseModel):
     skip_special_tokens: bool = Field(default=True, description="Remove special tokens (e.g. [CLS], [SEP], <pad>) from the decoded output string.")
 
+class EncoderDecoderGenerateParams(BaseModel):
+    encoder_output_name: str = Field(description="Encoder's output tensor name (for documentation/logging).")
+    decoder_input_ids_name: str = Field(description="Decoder's token ID input tensor name.")
+    decoder_encoder_states_name: str = Field(description="Decoder's cross-attention input tensor name.")
+    max_new_tokens: int = Field(default=128)
+    eos_token_id: Optional[int] = Field(default=None)
+    bos_token_id: Optional[int] = Field(default=None)
+    temperature: float = Field(default=1.0)
+    do_sample: bool = Field(default=False)
+    decoder_seq_len: Optional[int] = Field(default=None, description="Decoder input sequence length. Auto-detected from interpreter if omitted.")
+
 class MediaPipeGenerateParams(BaseModel):
     model_type: Literal["gemmaIt", "general", "deepSeek", "qwen", "llama", "hammer"] = Field(
         default="gemmaIt",
@@ -130,8 +141,8 @@ class PreprocessStep(BaseModel):
     params: Union[ResizeImageParams, NormalizeParams, FormatParams, TokenizeParams, ResampleAudioParams]
 
 class PostprocessStep(BaseModel):
-    step: Literal["apply_activation", "map_labels", "filter_by_score", "decode_boxes", "apply_nms", "generate", "decode_tokens", "mediapipe_generate", "decode_segmentation_mask", "ctc_decode", "decode_image"]
-    params: Union[ApplyActivationParams, MapLabelsParams, FilterByScoreParams, DecodeBoxesParams, ApplyNMSParams, GenerateParams, DecodeTokensParams, MediaPipeGenerateParams, DecodeSegmentationMaskParams, CtcDecodeParams, DecodeImageParams]
+    step: Literal["apply_activation", "map_labels", "filter_by_score", "decode_boxes", "apply_nms", "generate", "decode_tokens", "mediapipe_generate", "decode_segmentation_mask", "ctc_decode", "decode_image", "encoder_decoder_generate"]
+    params: Union[ApplyActivationParams, MapLabelsParams, FilterByScoreParams, DecodeBoxesParams, ApplyNMSParams, GenerateParams, DecodeTokensParams, MediaPipeGenerateParams, DecodeSegmentationMaskParams, CtcDecodeParams, DecodeImageParams, EncoderDecoderGenerateParams]
 
 # ==========================================
 # 5. THE MASTER CONFIGURATION BLOCKS
@@ -155,3 +166,6 @@ class PipelineConfig(BaseModel):
     outputs: List[TensorDefinition]
     preprocessing: List[PreprocessBlock]
     postprocessing: List[PostprocessBlock]
+    model_files: Optional[Dict[str, str]] = None
+    # e.g. {"encoder": "tflite_encoder", "decoder": "tflite_decoder"}
+    # Values are local asset keys (= filenames inside localDir on device)
