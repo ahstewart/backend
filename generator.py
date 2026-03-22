@@ -429,10 +429,10 @@ def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session
 
     Returns one of:
       "too_large"         — skipped; file exceeds MAX_PIPELINE_MODEL_SIZE_MB
-      "supported_clean"   — validated and supported on the first attempt
-      "supported_retried" — validated and supported after at least one LLM retry
+      "verified_clean"    — validated and verified on the first attempt
+      "verified_retried"  — validated and verified after at least one LLM retry
       "pending"           — pipeline stored but could not be fully validated
-      "unsupported"       — LLM rejected the model or structural validation failed
+      "missing"           — LLM rejected the model or structural validation failed
       "failed"            — LLM returned no result / unexpected error
     """
     label = f"{model.name} / {version.version_name}"
@@ -518,12 +518,12 @@ def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session
                         result = retry_result
 
                 if validation_passed:
-                    new_status = "supported"
+                    new_status = "verified"
                     status_reason = None
                 else:
-                    # Structural failures (wrong op, bad shape) → unsupported; environment failures
+                    # Structural failures (wrong op, bad shape) → missing; environment failures
                     # (timeout, model too large) → pending (pipeline may still work on device)
-                    new_status = "unsupported" if last_retryable else "pending"
+                    new_status = "missing" if last_retryable else "pending"
                     status_reason = f"TFLite validation failed: {last_error}"
                     result.config = last_corrected
                     logger.warning("[%s] Validation failed — storing as %s. Reason: %s",
@@ -536,7 +536,7 @@ def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session
             version.unsupported_reason = status_reason
         else:
             logger.info("[%s] LLM rejected model — reason: %s", label, result.reasoning)
-            version.status = "unsupported"
+            version.status = "missing"
             version.unsupported_reason = result.reasoning
             validation_retried = False
 
@@ -544,15 +544,15 @@ def run_generator_for_version(version: ModelVersionDB, model: MLModelDB, session
         session.commit()
 
         # Determine fine-grained outcome for caller statistics
-        if version.status == "supported":
-            outcome = "supported_retried" if validation_retried else "supported_clean"
+        if version.status == "verified":
+            outcome = "verified_retried" if validation_retried else "verified_clean"
         else:
-            outcome = version.status  # "pending" or "unsupported"
+            outcome = version.status  # "pending" or "missing"
 
         logger.info("[%s] ── Done (status=%s) ──", label, version.status)
         return outcome
     else:
-        logger.error("[%s] LLM returned no result — leaving as unsupported", label)
+        logger.error("[%s] LLM returned no result — leaving as missing", label)
         return "failed"
 
 
@@ -617,10 +617,10 @@ _SEGMENTATION_TASKS = SUPPORTED_TASKS & {
 def _log_run_summary(label: str, total: int, outcomes: list[str]) -> None:
     """Logs a structured summary table for a generator run."""
     too_large       = outcomes.count("too_large")
-    supported_clean = outcomes.count("supported_clean")
-    supported_retry = outcomes.count("supported_retried")
+    verified_clean  = outcomes.count("verified_clean")
+    verified_retry  = outcomes.count("verified_retried")
     pending         = outcomes.count("pending")
-    unsupported     = outcomes.count("unsupported")
+    missing         = outcomes.count("missing")
     failed          = outcomes.count("failed")
 
     logger.info(
@@ -630,18 +630,18 @@ def _log_run_summary(label: str, total: int, outcomes: list[str]) -> None:
         "══════════════════════════════════════════\n"
         "  Versions considered      : %d\n"
         "  Skipped (too large)      : %d\n"
-        "  Supported (clean)        : %d\n"
-        "  Supported (after retry)  : %d\n"
+        "  Verified (clean)         : %d\n"
+        "  Verified (after retry)   : %d\n"
         "  Pending                  : %d\n"
-        "  Unsupported              : %d\n"
+        "  Missing                  : %d\n"
         "  Failed (LLM/DB error)    : %d\n"
         "══════════════════════════════════════════",
         label, total,
         too_large,
-        supported_clean,
-        supported_retry,
+        verified_clean,
+        verified_retry,
         pending,
-        unsupported,
+        missing,
         failed,
     )
 
@@ -650,7 +650,7 @@ def process_all_unconfigured():
     """
     The main job loop. Finds all model versions that:
       - belong to a supported task type (one the app can run inference for), AND
-      - are not yet in "supported" status (i.e. still need generation or a retry)
+      - are not yet in "verified" status (i.e. still need generation or a retry)
     Then gathers context, asks the LLM for a config, and saves it if successful.
     """
     logger.info("Starting LLM Pipeline Generator...")
@@ -659,7 +659,7 @@ def process_all_unconfigured():
         statement = (
             select(ModelVersionDB, MLModelDB)
             .join(MLModelDB)
-            .where((ModelVersionDB.status != "supported") & (ModelVersionDB.status != "pending"))
+            .where((ModelVersionDB.status != "verified") & (ModelVersionDB.status != "pending"))
             .where(MLModelDB.task.in_(list(SUPPORTED_TASKS)))
         )
         results = session.exec(statement).all()
@@ -697,14 +697,14 @@ def retry_unsupported_segmentation():
         statement = (
             select(ModelVersionDB, MLModelDB)
             .join(MLModelDB)
-            .where(ModelVersionDB.status == "unsupported")
+            .where(ModelVersionDB.status == "missing")
             .where(MLModelDB.task.in_(list(_SEGMENTATION_TASKS)))
         )
         results = session.exec(statement).all()
         pairs = [(v.id, m.id) for v, m in results]
 
     if not pairs:
-        logger.info("No unsupported segmentation models found — nothing to do.")
+        logger.info("No missing segmentation models found — nothing to do.")
         return
 
     logger.info("Retrying %d segmentation version(s) with up to %d parallel worker(s)...",

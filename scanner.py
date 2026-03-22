@@ -76,7 +76,7 @@ def scan_hf_repo_for_version_assets(repo_id: str, commit_sha: str, license_type:
 
     # --- STRATEGY 2: THE STANDARDIZED CONFIG INGESTION ---
     pipeline_spec = None
-    status = "unsupported"
+    status = "missing"
 
     if config_file:
         try:
@@ -90,7 +90,7 @@ def scan_hf_repo_for_version_assets(repo_id: str, commit_sha: str, license_type:
 
         except Exception as e:
             print(f"Found jacana.yaml in {repo_id} but failed to parse: {e}")
-            status = "unsupported"
+            status = "missing"
 
     # Build the Version Payload
     return {

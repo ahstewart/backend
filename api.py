@@ -1,5 +1,15 @@
 import re
 from fastapi import FastAPI, HTTPException, Depends, APIRouter, status
+
+# Tasks currently supported by the Jacana Flutter inference engine.
+# Keep in sync with jacana-web/src/lib/supportedTasks.js
+SUPPORTED_TASKS = {
+    'image_classification', 'image-classification',
+    'object_detection', 'object-detection',
+    'text_generation', 'text-generation',
+    'image_to_text', 'image-to-text',
+}
+
 from pydantic import BaseModel
 from enum import Enum
 from typing import List, Dict, Any, Optional
@@ -188,7 +198,13 @@ def get_all_models(
         query = query.where(MLModelDB.task == task)
 
     if supported_only:
-        query = query.join(ModelVersionDB).where(ModelVersionDB.status.in_(["supported", "pending"])).distinct()
+        query = (
+            query
+            .where(MLModelDB.task.in_(SUPPORTED_TASKS))
+            .join(ModelVersionDB)
+            .where(ModelVersionDB.status.in_(["verified", "pending"]))
+            .distinct()
+        )
 
     query = query.offset(skip).limit(limit)
     models = session.exec(query).all()
@@ -207,8 +223,8 @@ def get_all_models(
         ).all()
     )
 
-    # Compute the "best" version status per model (supported > pending > unsupported)
-    _STATUS_PRIORITY = {"supported": 0, "pending": 1, "unsupported": 2}
+    # Compute the "best" version status per model (verified > pending > missing)
+    _STATUS_PRIORITY = {"verified": 0, "pending": 1, "missing": 2}
     best_statuses: dict = {}
     for vid, vstatus in session.exec(select(ModelVersionDB.model_id, ModelVersionDB.status)).all():
         current = best_statuses.get(vid)
@@ -312,7 +328,7 @@ def create_model_version(
     if not model:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
 
-    initial_status = "pending" if version_in.pipeline_spec else "unsupported"
+    initial_status = "pending" if version_in.pipeline_spec else "missing"
     new_version = ModelVersionDB(
         model_id=model_id,
         version_name=version_in.version_name,
@@ -449,7 +465,7 @@ def delete_pipeline_config(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model version not found.")
 
     version.pipeline_spec = None
-    version.status = "unsupported"
+    version.status = "missing"
     version.unsupported_reason = None
     version.pipeline_updated_at = None
 
