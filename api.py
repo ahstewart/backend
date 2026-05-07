@@ -244,6 +244,8 @@ def get_all_models(
             hf_model_id=m.hf_model_id,
             is_verified_official=m.is_verified_official,
             is_public=m.is_public,
+            hf_description=m.hf_description,
+            last_synced_at=m.last_synced_at,
             total_download_count=m.total_download_count,
             total_ratings=m.total_ratings,
             rating_weighted_avg=m.rating_weighted_avg,

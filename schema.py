@@ -98,8 +98,13 @@ class MLModelDB(MLModelBase, table=True):
     # Dynamic Task String (e.g., "image-classification") - Not an Enum!
     task: Optional[str] = Field(default=None, index=True)
     
+    # HuggingFace card description (separate from the user-editable description)
+    hf_description: Optional[str] = None
+    # Timestamp of the last successful HuggingFace sync for this model
+    last_synced_at: Optional[datetime] = None
+
     # Metrics
-    total_download_count: int = 0  
+    total_download_count: int = 0
     rating_weighted_avg: float = 0.0
     total_ratings: int = 0
     created_at: datetime = Field(default_factory=utc_now)
@@ -126,6 +131,8 @@ class MLModelRead(PydanticBaseModel):
     hf_model_id: Optional[str] = None
     is_verified_official: bool = False
     is_public: bool = True
+    hf_description: Optional[str] = None
+    last_synced_at: Optional[datetime] = None
     total_download_count: int
     total_ratings: int
     rating_weighted_avg: float

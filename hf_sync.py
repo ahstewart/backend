@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional
 import uuid
 from datetime import datetime, timezone
 from sqlmodel import Session, select
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, ModelCard
 import sqlalchemy
 import time
 import requests
@@ -186,23 +186,32 @@ def sync_huggingface_models(limit: int = 50):
                 # 2. Create or Update the Parent Model Summary
                 model = session.exec(select(MLModelDB).where(MLModelDB.hf_model_id == repo_id)).first()
                 
+                modelCardText = ModelCard.load(repo_id).text if ModelCard.load(repo_id) is not "" else None
+                hf_desc = modelCardText if modelCardText else None
+
+                now = datetime.now(timezone.utc)
+
                 if not model:
                     model = MLModelDB(
-                        name=repo_id.split("/")[-1].replace("-", " ").title(), # Format repo name nicely
+                        name=repo_id.split("/")[-1].replace("-", " ").title(),
                         slug=repo_id.replace("/", "-").lower(),
                         description=f"LiteRT model synced from Hugging Face from {repo_id}.",
-                        category=ModelCategory.UTILITY, # Default categorization
+                        category=ModelCategory.UTILITY,
                         author_id=system_author_id,
                         hf_model_id=repo_id,
-                        task=task
+                        task=task,
+                        hf_description=hf_desc or None,
+                        last_synced_at=now,
                     )
                     session.add(model)
-                    session.commit() # Commit early so we have the model.id for the version
+                    session.commit()
                     session.refresh(model)
                     stats["models created"] += 1
                 else:
-                    # Optionally update dynamic fields like task if HF changed them
                     model.task = task
+                    model.last_synced_at = now
+                    if hf_desc:
+                        model.hf_description = hf_desc
                     session.add(model)
                     session.commit()
                     stats["models updated"] += 1
@@ -288,23 +297,32 @@ def sync_single_model_version(repo_id: str, commit_sha: str):
             # 2. Create or Update the Parent Model Summary
             model = session.exec(select(MLModelDB).where(MLModelDB.hf_model_id == repo_id)).first()
             
+            modelCardText = ModelCard.load(repo_id).text if ModelCard.load(repo_id) is not "" else None
+            hf_desc = modelCardText if modelCardText else None
+
+            now = datetime.now(timezone.utc)
+
             if not model:
                 model = MLModelDB(
-                    name=repo_id.split("/")[-1].replace("-", " ").title(), # Format repo name nicely
+                    name=repo_id.split("/")[-1].replace("-", " ").title(),
                     slug=repo_id.replace("/", "-").lower(),
                     description=f"LiteRT model synced from Hugging Face from {repo_id}.",
-                    category=ModelCategory.UTILITY, # Default categorization
+                    category=ModelCategory.UTILITY,
                     author_id=system_author_id,
                     hf_model_id=repo_id,
-                    task=task
+                    task=task,
+                    hf_description=hf_desc or None,
+                    last_synced_at=now,
                 )
                 session.add(model)
-                session.commit() # Commit early so we have the model.id for the version
+                session.commit()
                 session.refresh(model)
                 logger.info(f"[{repo_id}] Created new model entry.")
             else:
-                # Optionally update dynamic fields like task if HF changed them
                 model.task = task
+                model.last_synced_at = now
+                if hf_desc:
+                    model.hf_description = hf_desc
                 session.add(model)
                 session.commit()
                 logger.info(f"[{repo_id}] Updated existing model entry.")
