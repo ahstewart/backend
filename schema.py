@@ -168,6 +168,9 @@ class ModelVersionDB(ModelVersionBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     model_id: uuid.UUID = Field(foreign_key="ml_models.id")
 
+    # True for the pipeline created automatically by the HF sync job — immutable by any user
+    is_system_generated: bool = Field(default=False)
+
     pipeline_spec: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSONB))
     unsupported_reason: Optional[str] = None
     pipeline_updated_at: Optional[datetime] = None
@@ -191,6 +194,7 @@ class ModelVersionRead(PydanticBaseModel):
     version_name: str
     commit_sha: str
     is_hosted_by_us: bool = False
+    is_system_generated: bool = False
     assets: AssetPointers
     license_type: str = "unknown"
     is_commercial_safe: bool = False

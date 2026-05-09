@@ -246,6 +246,7 @@ def sync_huggingface_models(limit: int = 50):
                     version_name=version_payload["version_name"],
                     commit_sha=version_payload["commit_sha"],
                     is_hosted_by_us=version_payload["is_hosted_by_us"],
+                    is_system_generated=True,
                     assets=version_payload["assets"], # The strict JSONB dictionary
                     pipeline_spec=version_payload.get("pipeline_spec"),
                     license_type=version_payload["license_type"],
